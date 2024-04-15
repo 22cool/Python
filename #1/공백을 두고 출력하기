@@ -1,0 +1,4 @@
+number = float(input("Enter the real number: "))
+print("Output: Width 15, right-aligned: {:>15}\n".format(number))
+print("Output: Width 15, left-aligned: {:<15}\n".format(number))
+print("Output: Width 15, centered: {:^15}".format(number))
