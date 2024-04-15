@@ -1,0 +1,4 @@
+string1 = input('Enter the string1: ')
+string2 = input('Enter the string2: ')
+string3 = input('Enter the string3: ')
+print("Output: "+string1+string2+string3)
