@@ -1,1 +1,2 @@
-
+number = input('Enter the number: ')
+print("Output: "+number,number,number)
