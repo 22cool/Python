@@ -1,0 +1,167 @@
+import os, csv, json
+from multiprocessing import Pool, cpu_count
+from shapely.geometry import Polygon
+from PIL import Image
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ────────────────────────Training 세트 경로───────────────────────────────────
+TRAIN_ROOTS = [
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Training\01.원천데이터\침수위험 지역 라벨링 데이터",  "raw_label_images"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Training\01.원천데이터\침수위험 수치모델 이미지 데이터","raw_numeric_images"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Training\02.라벨링데이터\침수위험 지역 라벨링 데이터",  "labeling_json"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Training\02.라벨링데이터\침수위험 수치모델 이미지 데이터","numeric_model_json"),
+]
+
+# ────────────────────────Validation 세트 경로───────────────────────────────────
+VAL_ROOTS = [
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Validation\01.원천데이터\VS\침수위험 지역 라벨링 데이터",  "raw_label_images_val"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Validation\01.원천데이터\VS\침수위험 수치모델 이미지 데이터","raw_numeric_images_val"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Validation\02.라벨링데이터\VL\침수위험 지역 라벨링 데이터",  "labeling_json_val"),
+    (r"C:\Users\yinji\OneDrive\바탕 화면\135.부산시 침수위험 복합 데이터\3.개방데이터\1.데이터\Validation\02.라벨링데이터\VL\침수위험 수치모델 이미지 데이터","numeric_model_json_val"),
+]
+# 전체 데이터 경로 리스트 합치기
+ROOTS = TRAIN_ROOTS + VAL_ROOTS
+
+# 결과 CSV 파일 경로
+OUT_CSV = os.path.join(os.getcwd(), "flood_full4_stats.csv")
+
+
+def process_path(args):
+    path, ds_type = args
+    recs = []
+    base, ext = os.path.basename(path), os.path.splitext(path)[1].lower()
+    district = os.path.basename(os.path.dirname(path))
+
+    # JSON 처리
+    if ext == ".json":
+        try:
+            data = json.load(open(path, "r", encoding="utf-8"))
+        except Exception:
+            return recs
+        # COCO 형식 라벨
+        if ds_type.startswith("labeling_json") and "annotations" in data:
+            images = data.get("images", [])
+            if images:
+                img_meta = images[0]
+                file_name = img_meta.get("file_name", base)
+                width = img_meta.get("width")
+                height = img_meta.get("height")
+                region = file_name.split("_")[0]
+                for ann in data["annotations"]:
+                    segs = ann.get("segmentation", [])
+                    if not segs or not segs[0]: continue
+                    coords = segs[0]
+                    pairs = list(zip(coords[0::2], coords[1::2]))
+                    if len(pairs) < 3: continue
+                    area = Polygon(pairs).area
+                    recs.append({
+                        "dataset_type": ds_type,
+                        "region":       region,
+                        "file_name":    file_name,
+                        "width":        width,
+                        "height":       height,
+                        "category_id":  ann.get("category_id", ""),
+                        "area":         area,
+                        "file_size_MB": os.path.getsize(path) / 1e6,
+                    })
+        # 내부 포맷 JSON
+        elif ds_type.startswith("numeric_model_json") and "IMAGE" in data:
+            img = data.get("IMAGE", {})
+            file_name = img.get("FILE_NAME", base)
+            region = file_name.split("_")[0]
+            width = img.get("WIDTH")
+            height = img.get("HEIGHT")
+            for ann in data.get("ANNOTATIONS", []):
+                coords = ann.get("COORDINATE", [])
+                if len(coords) < 3: continue
+                area = Polygon(coords).area
+                recs.append({
+                    "dataset_type": ds_type,
+                    "region":       region,
+                    "file_name":    file_name,
+                    "width":        width,
+                    "height":       height,
+                    "category_id":  ann.get("CATEGORY_ID", ""),
+                    "area":         area,
+                    "file_size_MB": os.path.getsize(path) / 1e6,
+                })
+    # 이미지 처리
+    elif ext in (".jpg", ".png"):
+        try:
+            with Image.open(path) as im:
+                w, h = im.size
+        except Exception:
+            w = h = None
+        recs.append({
+            "dataset_type": ds_type,
+            "region":       district,
+            "file_name":    base,
+            "width":        w,
+            "height":       h,
+            "category_id":  "",
+            "area":         None,
+            "file_size_MB": os.path.getsize(path) / 1e6,
+        })
+    return recs
+
+if __name__ == "__main__":
+    #처리할 파일 목록 생성
+    tasks = []
+    for root, ds in ROOTS:
+        if not os.path.isdir(root):
+            print(f"경로 없음: {root}")
+            continue
+        for dp, _, files in os.walk(root):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                full = os.path.join(dp, f)
+                if ext == ".json" or ext in (".jpg", ".png"):
+                    tasks.append((full, ds))
+    print(f"총 처리 대상 파일: {len(tasks):,}")
+
+    #CSV 헤더 기록
+    with open(OUT_CSV, "w", newline="", encoding="utf-8-sig") as csvf:
+        writer = csv.writer(csvf)
+        writer.writerow(["dataset_type", "region", "file_name", "width", "height", "category_id", "area", "file_size_MB"])
+        ##병렬처리(멀티프로세싱)
+        with Pool(cpu_count()) as pool:#사용 가능한 CPU 코어 수만큼 프로세스를 병렬로 실행
+            for recs in pool.imap_unordered(process_path, tasks, chunksize=100):#병렬 처리 대상인 tasks 리스트를 100개 단위로 나눠 각 프로세스에 분산
+                for r in recs: #처리된 결과 recs를 CSV로 저장
+                    writer.writerow([r["dataset_type"], r["region"], r["file_name"], r["width"], r["height"], r["category_id"], r["area"], r["file_size_MB"]])
+    print("CSV 저장 완료:", OUT_CSV)
+
+    #pandas 로드 & 시각화
+    df = pd.read_csv(OUT_CSV, low_memory=False)
+    plt.rcParams["font.family"]       = "Malgun Gothic" #폰트 설정정
+    plt.rcParams["axes.unicode_minus"] = False
+
+    #파일 수
+    print(df.dataset_type.value_counts(), "\n")
+
+    #해상도 분포
+    for lbl in ["raw_label_images", "raw_label_images_val", "raw_numeric_images", "raw_numeric_images_val"]:
+        sub = df[df.dataset_type == lbl]
+        if not sub.empty:
+            plt.figure(figsize=(6,4))
+            sub[["width","height"]].dropna().plot.hist(bins=50, alpha=0.6)
+            plt.title(f"{lbl} 해상도 분포")
+            plt.tight_layout(); plt.show()
+
+    #JSON 면적 분포
+    for key in ["labeling_json", "labeling_json_val", "numeric_model_json", "numeric_model_json_val"]:
+        sub = df[df.dataset_type == key]
+        if sub.empty:
+            print(f"{key} 데이터 없음")
+        else:
+            plt.figure(figsize=(6,3))
+            sub.groupby("category_id")["area"].sum().sort_values().plot(kind="barh", title=f"{key} 클래스별 총 면적")
+            plt.tight_layout(); plt.show()
+
+    #지역별 면적
+    if df['area'].notna().any():
+        plt.figure(figsize=(6,4))
+        df.groupby("region")["area"].sum().sort_values(ascending=False).plot(kind="bar", title="지역별 전체 침수 면적 합계")
+        plt.tight_layout(); plt.show()
+    else:
+        print("데이터가 없어 그래프를 그릴 수 없음")
